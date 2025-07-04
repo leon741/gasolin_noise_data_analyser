@@ -1,13 +1,13 @@
 import sys
-import time
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel,
-    QVBoxLayout, QHBoxLayout, QProgressBar, QSplashScreen
+    QVBoxLayout, QHBoxLayout, QProgressBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from openpyxl.styles import Alignment
+
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -15,7 +15,8 @@ import os
 from pathlib import Path 
 from openpyxl import Workbook, load_workbook
 from openpyxl.drawing.image import Image
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Border, Side
+from matplotlib.ticker import MaxNLocator
 
 plt.rcParams['legend.fontsize'] = 5
 
@@ -25,25 +26,46 @@ def resource_path(relative_path):
     return os.path.join(os.path.abspath("."), relative_path)
 
 def plot_acceleration_graph(ax, time_list, acc_list, start_point):
-    ax.plot(time_list[start_point-24:], acc_list[start_point-24:], label='accelerations', color='blue', linewidth=0.5)
-    ax.axvline(x=time_list[start_point], color='red', linestyle='--', label='peak point', linewidth=0.5)
-    ax.set_xlabel("Time(s)", fontsize=6)
-    ax.set_ylabel("ACC_X(G)", fontsize=6)
+    if not (0 <= start_point < len(time_list)):
+        raise IndexError(f"start_point {start_point} over time_list 长度")
+    start_idx = max(0, start_point - 24)
+    x = time_list[start_idx:]
+    y = acc_list[start_idx:]
+
+    ax.plot(x, y, label='Accelerations', color='blue', linewidth=0.5)
+    ax.axvline(x=time_list[start_point], color='red', linestyle='--',
+               label='Peak Point', linewidth=1)
+    zero_point = x[0]
+    x_labels = [str(round(i - zero_point, 3)) for i in x]
+    ax.set_xticks(x)
+    ax.set_xticklabels(x_labels, fontsize=5, rotation=0)
+    ax.set_xlabel("Time (s)", fontsize=6)
+    ax.set_ylabel("ACC_X (G)", fontsize=6)
     ax.set_title("Acceleration Graph", fontsize=6)
     ax.tick_params(axis='both', labelsize=5)
-    ax.legend()
+    ax.grid(True)
+    ax.legend(fontsize=5)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
 def plot_rear_center_noise(ax, time_list, noise_list, start_point, before_one_min_val=54, after_one_min_val=34):
-    ax.plot(time_list[start_point-24:], noise_list[start_point-24:], label='rear seat center noise(dB)', color='blue', linewidth=0.5)
-    ax.axvline(x=time_list[start_point], color='red', linestyle='--', label='peak point', linewidth=0.5)
-    ax.hlines(y=before_one_min_val, xmin = time_list[start_point], xmax = time_list[start_point]+1, colors = 'purple', linestyle = '-', linewidth =0.5)
-    ax.hlines(y=after_one_min_val, xmin = time_list[start_point]+1, xmax = time_list[-1], colors = 'purple', linestyle = '-', linewidth =0.5)
-    ax.vlines(x=time_list[start_point]+1, ymin=34, ymax=54, colors = 'purple', linestyle = '-', label = 'reference line', linewidth =0.5)
-    ax.set_xlabel("Time(s)", fontsize=6)
-    ax.set_ylabel("Rear SEAT_CENTER(dB-A)", fontsize=6)
+    start_idx = max(0, start_point - 24)
+    t0 = time_list[start_point]
+    shifted_time = [t - t0 for t in time_list[start_idx:]]
+    shifted_all_time = [t - t0 for t in time_list] 
+    y = noise_list[start_idx:]
+    ax.plot(shifted_time, y, label='Rear Seat Center Noise (dB)', color='blue', linewidth=0.5)
+    ax.axvline(x=0, color='red', linestyle='--', label='Peak Point', linewidth=1)
+    ax.hlines(y=before_one_min_val, xmin=0, xmax=1, colors='purple', linestyle='-', linewidth=1)
+    ax.hlines(y=after_one_min_val, xmin=1, xmax=shifted_all_time[-1], colors='purple', linestyle='-', linewidth=0.5)
+    ax.vlines(x=1, ymin=after_one_min_val, ymax=before_one_min_val,
+              colors='purple', linestyle='-', label='Reference Line', linewidth=1)
+    ax.set_xlabel("Time (s, relative to peak)", fontsize=6)
+    ax.set_ylabel("Rear SEAT_CENTER (dB-A)", fontsize=6)
     ax.set_title("Rear Seat Center Noise Graph", fontsize=6)
     ax.tick_params(axis='both', labelsize=5)
-    ax.legend()
+    ax.grid(True)
+    ax.legend(fontsize=5)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
 def conclusion_writer(csv_path, peak, peak_after_one_min, before_one_min_val=54, after_one_min_val=34):
     csv_path = Path(csv_path)
@@ -58,13 +80,19 @@ def conclusion_writer(csv_path, peak, peak_after_one_min, before_one_min_val=54,
 
     if 'FL' in parts:
         fuel_key = 'FL'
-        acc_vol = parts[5] if len(parts) > 5 else 'Unknown'
+    elif {'7', '8'}.issubset(parts):
+        fuel_key = '7/8'
+    elif {'3', '4'}.issubset(parts):
+        fuel_key = '3/4'
     else:
-        if len(parts) > 5:
-            fuel_key = f'{parts[4]}/{parts[5]}'
-            acc_vol = parts[6]
-        else:
-            raise ValueError(f"fuel type recognition error:{stem}")
+        raise ValueError(f"fuel type recognition error: {stem}")
+
+    valid_acc_vols = {'02G', '03G'}
+    acc_vol_candidates = valid_acc_vols.intersection(parts)
+    if acc_vol_candidates:
+        acc_vol = acc_vol_candidates.pop()
+    else:
+        raise ValueError(f"fuel volume recognition error: {stem}")
 
     judge = "G" if (peak < before_one_min_val and peak_after_one_min < after_one_min_val) else "N"
 
@@ -143,7 +171,7 @@ def xlsx_init(path):
     ws2 = wb.create_sheet(title="result")
 
     headers1 = ["加速度", "容量", "車内音 ~1s (dB-A)", "目標値(dB-A)", "車内音 1s~ (dB-A)", "目標値(dB-A)", "判定"]
-    headers2 = ["加速度", "Full", "7/8", "3/4"]
+    headers2 = ["加速度", "", "Full", "",  "7/8", "",  "3/4"]
 
     ws1.append(headers1)
     ws2.append(headers2)
@@ -165,14 +193,39 @@ def xlsx_init(path):
     for col in ['D', 'F']:
         ws1.column_dimensions[col].width = 13
 
-    ws2.row_dimensions[2].height = 230
-    ws2.row_dimensions[3].height = 230
+    thin = Side(border_style="thin", color="000000")
+    for row in ws1.iter_rows(min_row=1, max_row=7, min_col=1, max_col=7):
+        for cell in row:
+            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    for col in ['B', 'C', 'D']:
+    ws2.row_dimensions[2].height = 5
+    ws2.row_dimensions[4].height = 5
+    ws2.row_dimensions[3].height = 230
+    ws2.row_dimensions[5].height = 230
+
+    for col in ['C', 'E', 'G']:
         ws2.column_dimensions[col].width = 51
 
-    ws2['A2'] = "0.2G"
-    ws2['A3'] = "0.3G"
+    for col in ['B', 'D', 'F']:
+        ws2.column_dimensions[col].width = 0.5
+
+    ws2['A3'] = "0.2G"
+    ws2['A5'] = "0.3G"
+
+    center_alignment = Alignment(horizontal='center', vertical='center')
+
+    ws1['A2'].alignment = center_alignment
+    ws1['A5'].alignment = center_alignment
+
+    ws2['A3'].alignment = center_alignment
+    ws2['A5'].alignment = center_alignment
+    ws2['C1'].alignment = center_alignment
+    ws2['E1'].alignment = center_alignment
+    ws2['G1'].alignment = center_alignment
+
+    for row in ws2.iter_rows(min_row=1, max_row=5, min_col=1, max_col=7):
+        for cell in row:
+            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     save_path = f'{path}/result.xlsx'
     wb.save(save_path)
@@ -184,21 +237,21 @@ def fig_writer(path):
     img_folder_path = path / "figures"
 
     if not xlsx_path.exists():
-        raise FileNotFoundError(f"未找到 Excel 文件：{xlsx_path}")
+        raise FileNotFoundError(f"could not find Excel file:{xlsx_path}")
     if not img_folder_path.exists():
-        raise FileNotFoundError(f"未找到图片文件夹：{img_folder_path}")
+        raise FileNotFoundError(f"could not load the image:{img_folder_path}")
 
     wb = load_workbook(xlsx_path)
     ws = wb["result"]
 
     acc_to_row = {
-        '02G': 2,
-        '03G': 3
+        '02G': 3,
+        '03G': 5
     }
     fuel_to_col = {
-        'FL': 'B',
-        '7/8': 'C',
-        '3/4': 'D'
+        'FL': 'C',
+        '7/8': 'E',
+        '3/4': 'G'
     }
 
     for img_path in img_folder_path.iterdir():
@@ -214,13 +267,19 @@ def fig_writer(path):
 
         if 'FL' in parts:
             fuel_key = 'FL'
-            acc_vol = parts[5] if len(parts) > 5 else 'Unknown'
+        elif {'7', '8'}.issubset(parts):
+            fuel_key = '7/8'
+        elif {'3', '4'}.issubset(parts):
+            fuel_key = '3/4'
         else:
-            if len(parts) > 5:
-                fuel_key = f'{parts[4]}/{parts[5]}'
-                acc_vol = parts[6]
-            else:
-                raise ValueError(f"fuel type recognition error: {stem}")
+            raise ValueError(f"fuel type recognition error: {stem}")
+
+        valid_acc_vols = {'02G', '03G'}
+        acc_vol_candidates = valid_acc_vols.intersection(parts)
+        if acc_vol_candidates:
+            acc_vol = acc_vol_candidates.pop()
+        else:
+            raise ValueError(f"fuel volume recognition error: {stem}")
 
         import_row = acc_to_row.get(acc_vol.upper())
         import_col = fuel_to_col.get(fuel_key.upper())
@@ -229,9 +288,9 @@ def fig_writer(path):
             raise ValueError(f"could not find import position, acc={acc_vol}, fuel={fuel_key}, 文件名={stem}")
 
         import_position = f"{import_col}{import_row}"
+
         ws.add_image(img, import_position)
 
-    # 一次性保存
     wb.save(xlsx_path)
 
 def processer(path, progress_callback):
@@ -336,14 +395,9 @@ class MainWindow(QWidget):
         self.label.setText("⏳ 処理中")
         self.worker.start()
 
-# 启动入口
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    splash_pix = QPixmap(resource_path("splash.png"))
-    splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
-    splash.show()
     app.processEvents()
     window = MainWindow()
     window.show()
-    splash.finish(window)
     sys.exit(app.exec())
