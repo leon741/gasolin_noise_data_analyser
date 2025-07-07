@@ -3,11 +3,11 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel,
-    QVBoxLayout, QHBoxLayout, QProgressBar
+    QVBoxLayout, QHBoxLayout, QProgressBar, QLineEdit,
+    QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from openpyxl.styles import Alignment
-
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -17,6 +17,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.drawing.image import Image
 from openpyxl.styles import Border, Side
 from matplotlib.ticker import MaxNLocator
+import bisect
 
 plt.rcParams['legend.fontsize'] = 5
 
@@ -47,18 +48,31 @@ def plot_acceleration_graph(ax, time_list, acc_list, start_point):
     ax.legend(fontsize=5)
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
-def plot_rear_center_noise(ax, time_list, noise_list, start_point, before_one_min_val=54, after_one_min_val=34):
+def plot_rear_center_noise(ax, time_list, noise_list, start_point, before_one_min_val, after_one_min_val, terminate_sec):
     start_idx = max(0, start_point - 24)
-    t0 = time_list[start_point]
-    shifted_time = [t - t0 for t in time_list[start_idx:]]
-    shifted_all_time = [t - t0 for t in time_list] 
-    y = noise_list[start_idx:]
-    ax.plot(shifted_time, y, label='Rear Seat Center Noise (dB)', color='blue', linewidth=0.5)
+    t0 = time_list[start_point]  # 设为0秒的参考点（peak）
+
+    # 计算终止点索引
+    if terminate_sec is None:
+        end_idx = len(time_list)
+    else:
+        terminate = t0 + float(terminate_sec)
+        end_idx = bisect.bisect_left(time_list, terminate)
+
+    # 数据截取
+    plot_time = time_list[start_idx:end_idx]
+    plot_noise = noise_list[start_idx:end_idx]
+    shifted_time = [t - t0 for t in plot_time]
+    shifted_all_time = [t - t0 for t in time_list]
+
+    # 绘图
+    ax.plot(shifted_time, plot_noise, label='Rear Seat Center Noise (dB)', color='blue', linewidth=0.5)
     ax.axvline(x=0, color='red', linestyle='--', label='Peak Point', linewidth=1)
     ax.hlines(y=before_one_min_val, xmin=0, xmax=1, colors='purple', linestyle='-', linewidth=1)
-    ax.hlines(y=after_one_min_val, xmin=1, xmax=shifted_all_time[-1], colors='purple', linestyle='-', linewidth=0.5)
-    ax.vlines(x=1, ymin=after_one_min_val, ymax=before_one_min_val,
-              colors='purple', linestyle='-', label='Reference Line', linewidth=1)
+    ax.hlines(y=after_one_min_val, xmin=1, xmax=shifted_time[-1], colors='purple', linestyle='-', linewidth=0.5)
+    ax.vlines(x=1, ymin=after_one_min_val, ymax=before_one_min_val, colors='purple', linestyle='-', label='Reference Line', linewidth=1)
+
+    # 设置坐标轴属性
     ax.set_xlabel("Time (s, relative to peak)", fontsize=6)
     ax.set_ylabel("Rear SEAT_CENTER (dB-A)", fontsize=6)
     ax.set_title("Rear Seat Center Noise Graph", fontsize=6)
@@ -67,7 +81,12 @@ def plot_rear_center_noise(ax, time_list, noise_list, start_point, before_one_mi
     ax.legend(fontsize=5)
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
-def conclusion_writer(csv_path, peak, peak_after_one_min, before_one_min_val=54, after_one_min_val=34):
+    # 横坐标范围控制：保留 peak 前数据 + 限制右侧至 terminate_sec
+    left_limit = time_list[start_idx] - t0
+    right_limit = float(terminate_sec) if terminate_sec is not None else shifted_time[-1]
+    ax.set_xlim(left=left_limit, right=right_limit)
+
+def conclusion_writer(csv_path, peak, peak_after_one_min, before_one_min_val, after_one_min_val):
     csv_path = Path(csv_path)
     folder= csv_path.parent
     xlsx_path = folder / "result.xlsx"
@@ -94,7 +113,7 @@ def conclusion_writer(csv_path, peak, peak_after_one_min, before_one_min_val=54,
     else:
         raise ValueError(f"fuel volume recognition error: {stem}")
 
-    judge = "G" if (peak < before_one_min_val and peak_after_one_min < after_one_min_val) else "N"
+    judge = "G" if (peak < before_one_min_val and peak_after_one_min < after_one_min_val) else "R"
 
     acc_to_row = {
         '02G': 2,
@@ -123,41 +142,64 @@ def conclusion_writer(csv_path, peak, peak_after_one_min, before_one_min_val=54,
 
     wb.save(xlsx_path)
 
-def generate_graph_from_csv(csv_path, save_name=None, save=False):
-
+def generate_graph_from_csv(csv_path, before_one_val, after_one_val, terminate_sec, save_name=None, save=False):
     df = pd.read_csv(csv_path)
 
     expected_columns = ["Time(s)", "ACC_X(G)", "REAR SEAT_CENTER(dB-A)"]
     for col in expected_columns:
         if col not in df.columns:
-            raise ValueError(f"losing columns:{col},please check the .csv file")
+            raise ValueError(f"Missing column: {col}, please check the .csv file")
 
     time_list = df["Time(s)"].tolist()
     acc_list = df["ACC_X(G)"].tolist()
     noise_list = df["REAR SEAT_CENTER(dB-A)"].tolist()
 
     delta_acc_list = [acc_list[i] - acc_list[i - 1] for i in range(1, len(acc_list))]
-    start_point = delta_acc_list.index(max(delta_acc_list))
-
+    start_point = delta_acc_list.index(max(delta_acc_list)) + 1 
     peak_point = acc_list.index(max(acc_list[start_point:]))
 
     print(f"peak point index = {peak_point}, Time = {time_list[peak_point]}")
 
     fig, axs = plt.subplots(2, 1, figsize=(5, 4))
-    fig.suptitle(save_name, fontsize = 7)
+    fig.suptitle(save_name or "Unnamed", fontsize=7)
     plot_acceleration_graph(axs[0], time_list, acc_list, peak_point)
-    plot_rear_center_noise(axs[1], time_list, noise_list, peak_point)
+    plot_rear_center_noise(
+        axs[1],
+        time_list,
+        noise_list,
+        peak_point,
+        before_one_min_val=before_one_val,
+        after_one_min_val=after_one_val,
+        terminate_sec=terminate_sec
+    )
 
-    after_one_min_point = peak_point+25
-    conclusion_writer(csv_path, peak=max(noise_list[peak_point:peak_point+24]), peak_after_one_min=max(noise_list[after_one_min_point:]))
+    # 计算终止索引
+    after_one_min_point = peak_point + 25
+    if after_one_min_point >= len(noise_list):
+        after_one_min_point = len(noise_list) - 1  # 防越界
+
+    if terminate_sec is None:
+        end_idx = len(time_list)
+    else:
+        terminate = time_list[peak_point] + float(terminate_sec)
+        end_idx = bisect.bisect_left(time_list, terminate)
+        end_idx = min(end_idx, len(time_list))  # 防越界
+
+    conclusion_writer(
+        csv_path,
+        peak=max(noise_list[peak_point:min(peak_point + 24, len(noise_list))]),
+        peak_after_one_min=max(noise_list[after_one_min_point:end_idx]),
+        before_one_min_val=before_one_val,
+        after_one_min_val=after_one_val 
+    )
 
     plt.tight_layout()
 
-    if save == True:
+    if save:
         folder = os.path.dirname(csv_path)
         save_folder = os.path.join(folder, "figures")
         os.makedirs(save_folder, exist_ok=True)
-        fig_name = f'{save_name}.png'
+        fig_name = f'{save_name or "figure"}.png'
         save_path = os.path.join(save_folder, fig_name)
         fig.savefig(save_path, dpi=300)
 
@@ -293,7 +335,7 @@ def fig_writer(path):
 
     wb.save(xlsx_path)
 
-def processer(path, progress_callback):
+def processer(path, before_one_val, after_one_val, end_time, progress_callback):
     folder_path = Path(path)
     xlsx_init(path)
 
@@ -306,7 +348,7 @@ def processer(path, progress_callback):
     for i, file_path in enumerate(csv_files, 1):
         try:
             stem = file_path.stem
-            generate_graph_from_csv(file_path, save_name=stem, save=True)
+            generate_graph_from_csv(file_path, before_one_val, after_one_val, end_time, save_name=stem, save=True)
         except Exception as e:
             print(f"csv process failure: {file_path.name}:{e}")
 
@@ -324,12 +366,21 @@ def processer(path, progress_callback):
 class WorkerThread(QThread):
     progress = pyqtSignal(int)
 
-    def __init__(self, folder_path):
+    def __init__(self, path, before_one_val, after_one_val, end_time):
         super().__init__()
-        self.folder_path = folder_path
+        self.path = path
+        self.before_one_val = before_one_val
+        self.after_one_val = after_one_val
+        self.end_time = end_time
 
     def run(self):
-        processer(self.folder_path, self.progress)
+        processer(
+            path=self.path,
+            before_one_val=self.before_one_val,
+            after_one_val=self.after_one_val,
+            end_time=self.end_time,
+            progress_callback=self.progress
+        )
 
 # main gui
 class MainWindow(QWidget):
@@ -337,28 +388,68 @@ class MainWindow(QWidget):
         super().__init__()
         self.setWindowTitle("揺動音自動処理ツール")
         self.setAcceptDrops(True)
-        self.setFixedSize(420, 250)
+        self.setFixedSize(420, 300)
 
         self.folder_path = None
 
-        self.label = QLabel(".CSVを導入してください")
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.label.setStyleSheet("border: 2px dashed gray; padding: 40px;")
+        self.folder_label = QLabel(".CSVを導入してください")
+        self.folder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.folder_label.setStyleSheet("border: 2px dashed gray; padding: 40px;")
 
+        # 基準値入力1
+        self.ref_value_label = QLabel("開始から1sまでの基準値:")
+        self.ref_value_input = QLineEdit()
+        self.ref_value_input.setText("54")
+        self.ref_value_input.setFixedWidth(60)
+
+        # 基準値输入2
+        self.ref_value_label2 = QLabel("1s以後の基準値:")
+        self.ref_value_input2 = QLineEdit()
+        self.ref_value_input2.setText("34")
+        self.ref_value_input2.setFixedWidth(60)
+
+        # 終了時間
+        self.end_time_label = QLabel("終了時間を設定してください(単位-秒):")
+        self.end_time_select = QComboBox()
+        self.end_time_select.addItems(["None", "5", "4", "3", "2", "1"])
+        self.end_time_select.setCurrentIndex(0)
+        self.end_time_select.setFixedWidth(80)
+
+        # ボタン
         self.start_button = QPushButton("処理開始")
         self.start_button.clicked.connect(self.start_processing)
 
         self.quit_button = QPushButton("終了")
         self.quit_button.clicked.connect(self.close)
 
+        # プログレスバー
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
 
-        # 布局
+        # レイアウト設定
         layout = QVBoxLayout()
-        layout.addWidget(self.label)
+        layout.addWidget(self.folder_label)
+
+        # 输入框布局
+        ref_layout = QHBoxLayout()
+        ref_layout.addWidget(self.ref_value_label)
+        ref_layout.addWidget(self.ref_value_input)
+
+        ref_layout2 = QHBoxLayout()
+        ref_layout2.addWidget(self.ref_value_label2)
+        ref_layout2.addWidget(self.ref_value_input2)
+
+        time_layout = QHBoxLayout()
+        time_layout.addWidget(self.end_time_label)
+        time_layout.addWidget(self.end_time_select)
+
+        layout.addLayout(ref_layout)
+        layout.addLayout(ref_layout2)
+        layout.addLayout(time_layout)
+
         layout.addWidget(self.progress_bar)
 
+        # ボタン配置
         buttons = QHBoxLayout()
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.quit_button)
@@ -378,21 +469,41 @@ class MainWindow(QWidget):
             folder = Path(urls[0].toLocalFile())
             if folder.is_dir():
                 self.folder_path = folder
-                self.label.setText(f"✅ フォルダ読み込み完了")
+                self.folder_label.setText(f"✅ フォルダ読み込み完了")
             else:
-                self.label.setText("⚠️ フォルダをインポートしてください")
+                self.folder_label.setText("⚠️ フォルダをインポートしてください")
 
     # 启动主线程处理
     def start_processing(self):
         if not self.folder_path:
-            self.label.setText("⚠️ フォルダ無効")
+            self.folder_label.setText("⚠️ フォルダ無効")
             return
 
+        before_one_val_text = self.ref_value_input.text()
+        after_one_val_text = self.ref_value_input2.text()
+
+        try:
+            self.before_one_val = float(before_one_val_text)
+            self.after_one_val = float(after_one_val_text)
+        except ValueError:
+            self.folder_label.setText("⚠️ 基準値は数値で入力してください")
+            return
+
+        end_time = self.end_time_select.currentText()
+        if end_time == 'None':
+            self.end_time = None
+        else:
+            self.end_time = int(end_time)
+
+
         self.progress_bar.setValue(0)
-        self.worker = WorkerThread(self.folder_path)
+        self.worker = WorkerThread(self.folder_path, 
+                                   self.before_one_val, 
+                                   self.after_one_val, 
+                                   self.end_time)
         self.worker.progress.connect(self.progress_bar.setValue)
-        self.worker.finished.connect(lambda: self.label.setText("✅ 処理完了"))
-        self.label.setText("⏳ 処理中")
+        self.worker.finished.connect(lambda: self.folder_label.setText("✅ 処理完了"))
+        self.folder_label.setText("⏳ 処理中")
         self.worker.start()
 
 if __name__ == "__main__":
